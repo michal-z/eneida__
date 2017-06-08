@@ -1909,8 +1909,8 @@ static i32 (STDCALLP D3D12GetDebugInterface)(const win_GUID&, void**);
 static i32 (STDCALLP D3D12EnableExperimentalFeatures)(u32, const win_GUID&, void*, u32*);
 #ifdef _DEVELOPMENT
 struct D3D_SHADER_MACRO {
-  const char* Name;
-  const char* Definition;
+    const char* Name;
+    const char* Definition;
 };
 i32 (STDCALLP D3DCompileFromFile)(const wchar_t*, const D3D_SHADER_MACRO*, void*, const char*, const char*, u32, u32, ID3DBlob**, ID3DBlob**);
 #endif
@@ -1930,6 +1930,7 @@ static const win_GUID IID_ID3D12Fence = { 0x0a753dcf,0xc4d8,0x4b91,0xad,0xf6,0xb
 static const win_GUID IID_ID3D12PipelineState = { 0x765a30f3,0xf624,0x4c6f,0xa8,0x28,0xac,0xe9,0x48,0x62,0x24,0x45 };
 
 #define VHR(r) if (r < 0) { Assert(0); }
+#define SAFE_RELEASE(obj) if (obj) { (obj)->Release(); (obj) = nullptr; }
 
 static struct
 {
@@ -1960,9 +1961,15 @@ static struct
     void* Window;
     double FrameTime;
     float FrameDeltaTime;
+} G;
+
+struct FEngine0
+{
     ID3D12PipelineState* DisplayPSO;
     ID3D12RootSignature* DisplayRS;
-} G;
+    const char* VSDefine;
+    const char* PSDefine;
+};
 
 static double GetTime()
 {
@@ -2046,74 +2053,6 @@ static void UpdateFrameTime()
     FPSFrame++;
 }
 
-static void CreateShaders()
-{
-    // TODO: Implement non-development path
-#ifdef _DEVELOPMENT
-    ID3DBlob* VSBytecode;
-    ID3DBlob* PSBytecode;
-    ID3DBlob* Errors;
-    D3D_SHADER_MACRO VSMacros[] = { { "VS_FULL_TRIANGLE", "1" }, { nullptr, nullptr } };
-    D3D_SHADER_MACRO PSMacros[] = { { "PS_DISPLAY", "1" }, { nullptr, nullptr } };
-    i32 Res = D3DCompileFromFile(L"eneida.hlsl", VSMacros, nullptr, "VSFullTriangle", "vs_5_1", 0, 0, &VSBytecode, &Errors);
-    if (Res != 0)
-    {
-        if (Errors)
-        {
-            win_WriteConsole(win_GetStdHandle((u32)-11), Errors->GetBufferPointer(),
-                    (u32)Errors->GetBufferSize() - 1, nullptr, nullptr);
-        }
-        return;
-    }
-    Res = D3DCompileFromFile(L"eneida.hlsl", PSMacros, nullptr, "PSDisplay", "ps_5_1", 0, 0, &PSBytecode, &Errors);
-    if (Res != 0)
-    {
-        if (Errors)
-        {
-            win_WriteConsole(win_GetStdHandle((u32)-11), Errors->GetBufferPointer(),
-                    (u32)Errors->GetBufferSize() - 1, nullptr, nullptr);
-        }
-        return;
-    }
-
-    if (G.DisplayPSO) G.DisplayPSO->Release();
-    if (G.DisplayRS) G.DisplayRS->Release();
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC PSODesc = {};
-    PSODesc.VS = { VSBytecode->GetBufferPointer(), VSBytecode->GetBufferSize() };
-    PSODesc.PS = { PSBytecode->GetBufferPointer(), PSBytecode->GetBufferSize() };
-    PSODesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    PSODesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    PSODesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    PSODesc.SampleMask = 0xffffffff;
-    PSODesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    PSODesc.NumRenderTargets = 1;
-    PSODesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    PSODesc.SampleDesc.Count = 1;
-
-    VHR(G.Device->CreateGraphicsPipelineState(&PSODesc, IID_ID3D12PipelineState, (void**)&G.DisplayPSO));
-    VHR(G.Device->CreateRootSignature(0, VSBytecode->GetBufferPointer(), VSBytecode->GetBufferSize(),
-                IID_ID3D12RootSignature, (void**)&G.DisplayRS));
-    VSBytecode->Release();
-    PSBytecode->Release();
-#endif
-}
-
-static void UpdateShaders()
-{
-    static double PrevCompilation;
-
-    if (PrevCompilation == 0.0)
-    {
-        PrevCompilation = GetTime();
-    }
-    else if (win_GetAsyncKeyState(win_VK_CONTROL) && win_GetAsyncKeyState('S') && (GetTime() - PrevCompilation) > 0.25)
-    {
-        win_Sleep(50);
-        CreateShaders();
-        PrevCompilation = GetTime();
-    }
-}
-
 static void Present()
 {
     Assert(G.CmdQueue);
@@ -2133,7 +2072,7 @@ static void Present()
     G.FrameIndex = !G.FrameIndex;
 }
 
-static i32 InitializeD3D12()
+static bool InitializeD3D12()
 {
     Assert(G.Device == nullptr);
     Assert(G.Window != nullptr);
@@ -2151,7 +2090,7 @@ static i32 InitializeD3D12()
 #endif
     if (D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_ID3D12Device, (void**)&G.Device) != 0)
     {
-        return 0;
+        return false;
     }
 
     D3D12_COMMAND_QUEUE_DESC CmdQueueDesc = {};
@@ -2248,21 +2187,96 @@ static i32 InitializeD3D12()
 
     VHR(G.Device->CreateCommandList(1, D3D12_COMMAND_LIST_TYPE_DIRECT, G.CmdAlloc[0], nullptr,
                 IID_ID3D12GraphicsCommandList, (void**)&G.CmdList));
+    G.CmdList->Close();
 
     G.Viewport = { 0.0f, 0.0f, (float)G.BackBufferResolution[0], (float)G.BackBufferResolution[1], 0.0f, 1.0f };
     G.Scissor = { 0, 0, (i32)G.BackBufferResolution[0], (i32)G.BackBufferResolution[1] };
 
-    G.CmdList->Close();
-
-    CreateShaders();
-    return 1;
+    return true;
 }
 
-static void Update()
+static void ShutdownD3D12()
+{
+}
+
+static void UpdateShaders(void* EnginePtr, void (*RebuildShaders)(void* EnginePtr))
+{
+    static double PrevCompilation;
+
+    if (PrevCompilation == 0.0)
+    {
+        PrevCompilation = GetTime();
+    }
+    else if (win_GetAsyncKeyState(win_VK_CONTROL) && win_GetAsyncKeyState('S') && (GetTime() - PrevCompilation) > 0.25)
+    {
+        win_Sleep(50);
+        RebuildShaders(EnginePtr);
+        PrevCompilation = GetTime();
+    }
+}
+
+static void E0_CreateShaders(void* EnginePtr)
+{
+    FEngine0& E0 = *(FEngine0*)EnginePtr;
+
+    // TODO: Implement non-development path
+#ifdef _DEVELOPMENT
+    Assert(E0.VSDefine);
+    Assert(E0.PSDefine);
+    ID3DBlob* VSBytecode;
+    ID3DBlob* PSBytecode;
+    ID3DBlob* Errors;
+    D3D_SHADER_MACRO VSMacros[] = { { E0.VSDefine, "1" }, { nullptr, nullptr } };
+    D3D_SHADER_MACRO PSMacros[] = { { E0.PSDefine, "1" }, { nullptr, nullptr } };
+    i32 Res = D3DCompileFromFile(L"eneida.hlsl", VSMacros, nullptr, "VSFullTriangle", "vs_5_1", 0, 0, &VSBytecode, &Errors);
+    if (Res != 0)
+    {
+        if (Errors)
+        {
+            win_WriteConsole(win_GetStdHandle((u32)-11), Errors->GetBufferPointer(),
+                    (u32)Errors->GetBufferSize() - 1, nullptr, nullptr);
+        }
+        return;
+    }
+    Res = D3DCompileFromFile(L"eneida.hlsl", PSMacros, nullptr, "PSDisplay", "ps_5_1", 0, 0, &PSBytecode, &Errors);
+    if (Res != 0)
+    {
+        if (Errors)
+        {
+            win_WriteConsole(win_GetStdHandle((u32)-11), Errors->GetBufferPointer(),
+                    (u32)Errors->GetBufferSize() - 1, nullptr, nullptr);
+        }
+        return;
+    }
+
+    SAFE_RELEASE(E0.DisplayPSO);
+    SAFE_RELEASE(E0.DisplayRS);
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC PSODesc = {};
+    PSODesc.VS = { VSBytecode->GetBufferPointer(), VSBytecode->GetBufferSize() };
+    PSODesc.PS = { PSBytecode->GetBufferPointer(), PSBytecode->GetBufferSize() };
+    PSODesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+    PSODesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+    PSODesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    PSODesc.SampleMask = 0xffffffff;
+    PSODesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+    PSODesc.NumRenderTargets = 1;
+    PSODesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+    PSODesc.SampleDesc.Count = 1;
+
+    VHR(G.Device->CreateGraphicsPipelineState(&PSODesc, IID_ID3D12PipelineState, (void**)&E0.DisplayPSO));
+    VHR(G.Device->CreateRootSignature(0, VSBytecode->GetBufferPointer(), VSBytecode->GetBufferSize(),
+                IID_ID3D12RootSignature, (void**)&E0.DisplayRS));
+    SAFE_RELEASE(VSBytecode);
+    SAFE_RELEASE(PSBytecode);
+#endif
+}
+
+static void E0_Update(FEngine0& E0)
 {
 #ifdef _DEVELOPMENT
-    UpdateShaders();
+    UpdateShaders(&E0, E0_CreateShaders);
 #endif
+
     ID3D12CommandAllocator* CmdAlloc = G.CmdAlloc[G.FrameIndex];
     CmdAlloc->Reset();
 
@@ -2286,8 +2300,8 @@ static void Update()
     CmdList->OMSetRenderTargets(1, &RTVHandle, 0, &G.DSVHeapStart);
     CmdList->ClearRenderTargetView(RTVHandle, ClearColor, 0, nullptr);
     CmdList->ClearDepthStencilView(G.DSVHeapStart, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
-    CmdList->SetPipelineState(G.DisplayPSO);
-    CmdList->SetGraphicsRootSignature(G.DisplayRS);
+    CmdList->SetPipelineState(E0.DisplayPSO);
+    CmdList->SetGraphicsRootSignature(E0.DisplayRS);
     CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     CmdList->DrawInstanced(3, 1, 0, 0);
 
@@ -2299,24 +2313,15 @@ static void Update()
     G.CmdQueue->ExecuteCommandLists(1, (ID3D12CommandList**)&CmdList);
 }
 
-static i32 Run()
+static i32 E0_Run(FEngine0& E0)
 {
-    win_QueryPerformanceCounter(&G.StartCounter);
-    win_QueryPerformanceFrequency(&G.Frequency);
-    win_SetProcessDPIAware();
-    win_AllocConsole();
-
-    G.Window = CreateWindow(1920, 1080);
-
-    if (!InitializeD3D12())
-    {
-        // TODO: Add MessageBox
-        return 1;
-    }
+    E0.VSDefine = "VS_FULL_TRIANGLE";
+    E0.PSDefine = "PS_DISPLAY";
+    E0_CreateShaders(&E0);
 
     for (;;)
     {
-        win_MSG Message = { 0 };
+        win_MSG Message = {};
         if (win_PeekMessage(&Message, 0, 0, 0, win_PM_REMOVE))
         {
             win_DispatchMessage(&Message);
@@ -2328,13 +2333,13 @@ static i32 Run()
         else
         {
             UpdateFrameTime();
-            Update();
+            E0_Update(E0);
             Present();
         }
     }
 
-    //ex.shutdown(s.dx_context);
-    //dx12_destroy_context(s.dx_context);
+    SAFE_RELEASE(E0.DisplayPSO);
+    SAFE_RELEASE(E0.DisplayRS);
     return 0;
 }
 
@@ -2389,7 +2394,24 @@ void Start()
     Assert(DXCompilerDLL);
     D3DCompileFromFile = (decltype(D3DCompileFromFile))GetProcAddress(DXCompilerDLL, "D3DCompileFromFile");
     Assert(D3DCompileFromFile);
+    win_AllocConsole();
 #endif
 
-    win_ExitProcess(Run());
+    win_QueryPerformanceCounter(&G.StartCounter);
+    win_QueryPerformanceFrequency(&G.Frequency);
+    win_SetProcessDPIAware();
+
+    G.Window = CreateWindow(1280, 720);
+
+    if (!InitializeD3D12())
+    {
+        // TODO: Add MessageBox
+        win_ExitProcess(255);
+    }
+
+    FEngine0 Engine = {};
+    E0_Run(Engine);
+
+    ShutdownD3D12();
+    win_ExitProcess(0);
 }
